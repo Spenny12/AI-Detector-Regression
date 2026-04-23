@@ -36,20 +36,29 @@ def evaluate_ai_content(text, api_token):
     
     try:
         # We add a small sleep to respect free tier rate limits
-        time.sleep(1) 
+        time.sleep(1.5)
         response = requests.post(API_URL, headers=headers, json={"inputs": text})
-        
+
+        # --- THE FIX IS HERE ---
+        # If the status code is not 200 (OK), don't try to parse JSON
+        if not response.ok:
+            st.toast(f"API Failed ({response.status_code}): {response.text[:100]}")
+            return 5 # Neutral fallback
+        # -----------------------
+
         # Hugging Face models sometimes need to "wake up" if unused recently
-        if 'estimated_time' in response.json():
-            st.toast("Model is warming up, waiting 20 seconds...")
-            time.sleep(20)
-            response = requests.post(API_URL, headers=headers, json={"inputs": text})
-            
         result = response.json()
-        
+        if isinstance(result, dict) and 'estimated_time' in result:
+            st.toast(f"Model warming up, waiting {int(result['estimated_time'])} seconds...")
+            time.sleep(result['estimated_time'])
+            response = requests.post(API_URL, headers=headers, json={"inputs": text})
+            if not response.ok:
+                return 5
+            result = response.json()
+
         # The API returns a list of dictionaries. We need the score for 'Fake' (AI)
         fake_score = 0.5 # Default to neutral
-        
+
         # Handle the standard Hugging Face classification output format
         if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
              for label_data in result[0]:
@@ -57,7 +66,6 @@ def evaluate_ai_content(text, api_token):
                     fake_score = label_data.get('score', 0.5)
                     break
         elif isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict):
-             # Sometimes it returns a flat list
              for label_data in result:
                 if label_data.get('label') == 'Fake':
                     fake_score = label_data.get('score', 0.5)
@@ -65,10 +73,10 @@ def evaluate_ai_content(text, api_token):
 
         # Convert percentage (0.0 - 1.0) to a 1-10 integer scale
         final_score = int(round(fake_score * 10))
-        return max(1, final_score) # Ensure minimum score is 1
-        
+        return max(1, final_score)
+
     except Exception as e:
-        st.toast(f"API Error: {e}")
+        st.toast(f"Evaluation Error: {e}")
         return 5 # Neutral fallback on failure
 
 
