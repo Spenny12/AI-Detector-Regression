@@ -26,18 +26,12 @@ def scrape_text_from_url(url):
         st.toast(f"Error scraping {url}: {e}")
         return None
 
-def evaluate_ai_content(text, api_key):
-    """Sends text to Gemini API and returns a 1-10 score."""
+def evaluate_ai_content(text, model):
+    """Sends text to Gemini API and returns a 1-10 score or None on error."""
     if not text or len(text.strip()) < 50:
-        return 5 # Neutral score if there's not enough text
+        return None  # Clearly indicate that there wasn't enough text to evaluate
 
     try:
-        # Configure the Gemini API client
-        genai.configure(api_key=api_key)
-
-        # Using Gemini 1.5 Flash for speed and cost-efficiency
-        model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
-
         prompt = f"""
         Analyze the following text for signs of AI generation (e.g., repetitive sentence structures,
         lack of burstiness, common AI idioms, predictable vocabulary).
@@ -52,9 +46,11 @@ def evaluate_ai_content(text, api_key):
         {text}
         """
 
-        # REMOVED: time.sleep(4) - Your paid key can handle the speed!
-
-        response = model.generate_content(prompt)
+        # Using explicit timeout for robustness
+        response = model.generate_content(
+            prompt,
+            request_options={'timeout': 30}
+        )
 
         # Clean the response to ensure we only grab the integer
         score_text = response.text.strip()
@@ -63,12 +59,9 @@ def evaluate_ai_content(text, api_key):
         # Clamp the score between 1 and 10 just in case
         return max(1, min(10, score))
 
-    except ValueError:
-        st.toast("Gemini returned a non-integer response. Defaulting to 5.")
-        return 5
     except Exception as e:
-        st.toast(f"Gemini API Error: {e}")
-        return 5
+        # We'll handle the display of the error in the main loop to avoid toast clutter
+        raise e
 
 
 # --- STREAMLIT UI ---
@@ -103,6 +96,14 @@ if uploaded_file is not None:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
+                # Configure the Gemini API client once
+                try:
+                    genai.configure(api_key=gemini_api_key)
+                    model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
+                except Exception as e:
+                    st.error(f"Failed to initialize Gemini API: {e}")
+                    st.stop()
+
                 ai_scores = []
                 total_urls = len(df)
 
@@ -113,9 +114,22 @@ if uploaded_file is not None:
                     # 1. Scrape
                     scraped_text = scrape_text_from_url(url)
 
-                    # 2. Evaluate
-                    score = evaluate_ai_content(scraped_text, gemini_api_key)
-                    ai_scores.append(score)
+                    if not scraped_text:
+                        st.warning(f"⚠️ Could not extract text from {url}. Skipping AI evaluation.")
+                        ai_scores.append(None)
+                    else:
+                        # 2. Evaluate
+                        try:
+                            score = evaluate_ai_content(scraped_text, model)
+                            if score is None:
+                                st.warning(f"⚠️ Not enough text on {url} for a reliable score (min 50 chars).")
+                            ai_scores.append(score)
+                        except Exception as e:
+                            st.error(f"❌ Error evaluating {url}: {e}")
+                            ai_scores.append(None)
+
+                        # Rate limit protection (as requested by user)
+                        time.sleep(1)
 
                     # Update progress
                     progress_bar.progress((index + 1) / total_urls)
@@ -123,39 +137,56 @@ if uploaded_file is not None:
                 status_text.text("✅ Evaluation complete!")
                 df['AI_Score'] = ai_scores
 
-                st.write("### Scored Data", df)
+                # Filter out rows where AI evaluation failed for the regression
+                df_clean = df.dropna(subset=['AI_Score'])
 
-                # --- REGRESSION AND VISUALIZATION ---
-                st.write("### Linear Regression Analysis")
+                if df_clean.empty:
+                    st.error("No valid AI scores were generated. Cannot perform analysis.")
+                else:
+                    st.write("### Scored Data", df)
+                    if len(df_clean) < len(df):
+                        st.info(f"Note: {len(df) - len(df_clean)} rows were excluded from analysis due to missing scores.")
 
-                fig = px.scatter(
-                    df,
-                    x="AI_Score",
-                    y="Click_Change",
-                    trendline="ols",
-                    hover_data=["URL"],
-                    title="Impact of AI Content on YoY Click Change",
-                    labels={
-                        "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
-                        "Click_Change": "Click Change YoY (%)"
-                    }
-                )
+                    # --- REGRESSION AND VISUALIZATION ---
+                    st.write("### Linear Regression Analysis")
 
-                fig.update_layout(template="plotly_white")
-                fig.update_traces(marker=dict(size=10, opacity=0.7, color="#1f77b4"))
+                    fig = px.scatter(
+                        df_clean,
+                        x="AI_Score",
+                        y="Click_Change",
+                        trendline="ols",
+                        hover_data=["URL"],
+                        title="Impact of AI Content on YoY Click Change",
+                        labels={
+                            "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
+                            "Click_Change": "Click Change YoY (%)"
+                        }
+                    )
 
-                st.plotly_chart(fig, use_container_width=True)
+                    # Enhance marker visibility for individual data points
+                    fig.update_layout(template="plotly_white")
+                    fig.update_traces(
+                        marker=dict(
+                            size=12,
+                            opacity=0.8,
+                            color="#1f77b4",
+                            line=dict(width=1, color='DarkSlateGrey')
+                        ),
+                        selector=dict(mode='markers')
+                    )
 
-                # --- EXTRACT STATS ---
-                results = px.get_trendline_results(fig)
-                if not results.empty:
-                    model = results.iloc[0]["px_fit_results"]
+                    st.plotly_chart(fig, use_container_width=True)
 
-                    col1, col2, col3 = st.columns(3)
+                    # --- EXTRACT STATS ---
+                    results = px.get_trendline_results(fig)
+                    if not results.empty:
+                        model_results = results.iloc[0]["px_fit_results"]
 
-                    r_squared = model.rsquared
-                    p_value = model.pvalues[1]
-                    slope = model.params[1]
+                        col1, col2, col3 = st.columns(3)
+
+                        r_squared = model_results.rsquared
+                        p_value = model_results.pvalues[1]
+                        slope = model_results.params[1]
 
                     col1.metric("R-Squared", f"{r_squared:.4f}")
                     col2.metric("P-Value", f"{p_value:.4f}")
