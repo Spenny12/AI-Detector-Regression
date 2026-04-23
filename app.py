@@ -31,23 +31,23 @@ def evaluate_ai_content(text, api_token):
     if not text or len(text.strip()) < 50:
         return 5 # Neutral score if there's not enough text to analyze
         
-    API_URL = "https://api-inference.huggingface.co/models/openai-community/roberta-base-openai-detector"
+    # --- UPDATED: New, modern ChatGPT detector model ---
+    API_URL = "https://api-inference.huggingface.co/models/Hello-SimpleAI/chatgpt-detector-roberta"
     headers = {"Authorization": f"Bearer {api_token}"}
-    
+
     try:
-        # We add a small sleep to respect free tier rate limits
+        # Small sleep to respect free tier rate limits
         time.sleep(1.5)
         response = requests.post(API_URL, headers=headers, json={"inputs": text})
 
-        # --- THE FIX IS HERE ---
         # If the status code is not 200 (OK), don't try to parse JSON
         if not response.ok:
             st.toast(f"API Failed ({response.status_code}): {response.text[:100]}")
             return 5 # Neutral fallback
-        # -----------------------
+
+        result = response.json()
 
         # Hugging Face models sometimes need to "wake up" if unused recently
-        result = response.json()
         if isinstance(result, dict) and 'estimated_time' in result:
             st.toast(f"Model warming up, waiting {int(result['estimated_time'])} seconds...")
             time.sleep(result['estimated_time'])
@@ -56,18 +56,18 @@ def evaluate_ai_content(text, api_token):
                 return 5
             result = response.json()
 
-        # The API returns a list of dictionaries. We need the score for 'Fake' (AI)
         fake_score = 0.5 # Default to neutral
 
         # Handle the standard Hugging Face classification output format
         if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
              for label_data in result[0]:
-                if label_data.get('label') == 'Fake':
+                # --- UPDATED: Look for the 'ChatGPT' label instead of 'Fake' ---
+                if label_data.get('label') in ['Fake', 'ChatGPT']:
                     fake_score = label_data.get('score', 0.5)
                     break
         elif isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict):
              for label_data in result:
-                if label_data.get('label') == 'Fake':
+                if label_data.get('label') in ['Fake', 'ChatGPT']:
                     fake_score = label_data.get('score', 0.5)
                     break
 
