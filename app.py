@@ -36,7 +36,7 @@ def evaluate_ai_content(text, api_key):
         genai.configure(api_key=api_key)
 
         # Using Gemini 1.5 Flash for speed and cost-efficiency
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
 
         prompt = f"""
         Analyze the following text for signs of AI generation (e.g., repetitive sentence structures,
