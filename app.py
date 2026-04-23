@@ -32,7 +32,7 @@ def evaluate_ai_content(text, api_token):
         return 5 # Neutral score if there's not enough text to analyze
         
     # --- UPDATED: New, modern ChatGPT detector model ---
-    API_URL = "https://api-inference.huggingface.co/models/Hello-SimpleAI/chatgpt-detector-roberta"
+    API_URL = "https://router.huggingface.co/hf-inference/models/Hello-SimpleAI/chatgpt-detector-roberta"
     headers = {"Authorization": f"Bearer {api_token}"}
 
     try:
