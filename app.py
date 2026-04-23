@@ -31,7 +31,7 @@ def evaluate_ai_content(text, api_token):
     if not text or len(text.strip()) < 50:
         return 5 # Neutral score if there's not enough text to analyze
         
-    API_URL = "https://api-inference.huggingface.co/models/roberta-base-openai-detector"
+    API_URL = "https://api-inference.huggingface.co/models/openai-community/roberta-base-openai-detector"
     headers = {"Authorization": f"Bearer {api_token}"}
     
     try:
