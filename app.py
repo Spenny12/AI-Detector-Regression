@@ -5,9 +5,8 @@ import plotly.express as px
 import requests
 from bs4 import BeautifulSoup
 import time
-import google.generativeai as genai
 
-# --- AI EVALUATION LOGIC (GEMINI) ---
+# --- AI EVALUATION LOGIC (HUGGING FACE) ---
 def scrape_text_from_url(url):
     """Scrapes paragraph text from a given URL."""
     try:
@@ -19,49 +18,65 @@ def scrape_text_from_url(url):
         paragraphs = soup.find_all('p')
         text = ' '.join([p.get_text() for p in paragraphs])
 
-        # We limit to ~5000 characters to give Gemini plenty of context
-        # while keeping requests lightweight.
-        return text[:5000]
+        # RoBERTa models typically have a 512-token limit.
+        # We truncate to ~1500 characters to prevent API token overflow errors.
+        return text[:1500]
     except Exception as e:
         st.toast(f"Error scraping {url}: {e}")
         return None
 
-def evaluate_ai_content(text, model):
-    """Sends text to Gemini API and returns a 1-10 score or None on error."""
+def evaluate_ai_content(text, api_token):
+    """Sends text to Hugging Face API and returns a 1-10 score."""
     if not text or len(text.strip()) < 50:
-        return None  # Clearly indicate that there wasn't enough text to evaluate
+        return 5 # Neutral score if there's not enough text
+
+    # Endpoint for the specific Oxidane model
+    API_URL = "https://api-inference.huggingface.co/models/Oxidane/tmr-ai-text-detector"
+    headers = {"Authorization": f"Bearer {api_token}"}
 
     try:
-        prompt = f"""
-        Analyze the following text for signs of AI generation (e.g., repetitive sentence structures,
-        lack of burstiness, common AI idioms, predictable vocabulary).
+        # Sleep to respect free tier rate limits
+        time.sleep(1.5)
+        response = requests.post(API_URL, headers=headers, json={"inputs": text})
 
-        Rate the likelihood of it being AI-generated on a strict integer scale of 1 to 10:
-        1 = Entirely Human
-        10 = Entirely AI
+        # Catch HTTP errors (e.g., 503 Model Loading, 429 Rate Limit)
+        if not response.ok:
+            st.toast(f"API Failed ({response.status_code}): {response.text[:100]}")
+            return 5
 
-        Output ONLY the integer number. Do not include any other words, punctuation, or explanation.
+        result = response.json()
 
-        Text to analyze:
-        {text}
-        """
+        # Hugging Face models sometimes need to "wake up"
+        if isinstance(result, dict) and 'estimated_time' in result:
+            wait_time = int(result['estimated_time']) + 2
+            st.toast(f"Model warming up, waiting {wait_time} seconds...")
+            time.sleep(wait_time)
+            response = requests.post(API_URL, headers=headers, json={"inputs": text})
+            if not response.ok:
+                return 5
+            result = response.json()
 
-        # Using explicit timeout for robustness
-        response = model.generate_content(
-            prompt,
-            request_options={'timeout': 30}
-        )
+        fake_score = 0.5 # Default to neutral
 
-        # Clean the response to ensure we only grab the integer
-        score_text = response.text.strip()
-        score = int(''.join(filter(str.isdigit, score_text)))
+        # Robustly parse the labels.
+        # Community models use different names for the "AI" class (e.g., LABEL_1, Fake, AI)
+        if isinstance(result, list) and len(result) > 0:
+            labels_list = result[0] if isinstance(result[0], list) else result
 
-        # Clamp the score between 1 and 10 just in case
-        return max(1, min(10, score))
+            for label_data in labels_list:
+                label_name = str(label_data.get('label', '')).lower()
+                # Check against common AI label names
+                if label_name in ['ai', 'fake', 'label_1', '1', 'generated']:
+                    fake_score = label_data.get('score', 0.5)
+                    break
+
+        # Convert percentage (0.0 - 1.0) to a 1-10 integer scale
+        final_score = int(round(fake_score * 10))
+        return max(1, final_score)
 
     except Exception as e:
-        # We'll handle the display of the error in the main loop to avoid toast clutter
-        raise e
+        st.toast(f"Evaluation Error: {e}")
+        return 5
 
 
 # --- STREAMLIT UI ---
@@ -70,20 +85,20 @@ st.set_page_config(page_title="AI Content vs. Clicks Analyzer", layout="wide")
 st.title("📈 AI Content vs. Organic Click Performance")
 st.markdown("""
 Upload a CSV containing your URLs and their Year-over-Year (YoY) click change.
-This tool scans the pages, rates the presence of AI-generated content (1-10) using **Google Gemini**, and performs a linear regression.
+This tool scans the pages, rates the presence of AI-generated content (1-10) using **Oxidane/tmr-ai-text-detector**, and performs a linear regression.
 """)
 
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("1. API Configuration")
-gemini_api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Get a free key from Google AI Studio (aistudio.google.com)")
+hf_token = st.sidebar.text_input("Hugging Face API Token", type="password", help="Get a free token from huggingface.co/settings/tokens")
 
 st.sidebar.header("2. Data Input")
 uploaded_file = st.sidebar.file_uploader("Upload CSV (Columns: URL, Click_Change)", type=["csv"])
 
 # --- MAIN APP FLOW ---
 if uploaded_file is not None:
-    if not gemini_api_key:
-        st.warning("⚠️ Please enter your Gemini API Key in the sidebar to proceed.")
+    if not hf_token:
+        st.warning("⚠️ Please enter your Hugging Face API Token in the sidebar to proceed.")
     else:
         df = pd.read_csv(uploaded_file)
 
@@ -96,14 +111,6 @@ if uploaded_file is not None:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
-                # Configure the Gemini API client once
-                try:
-                    genai.configure(api_key=gemini_api_key)
-                    model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
-                except Exception as e:
-                    st.error(f"Failed to initialize Gemini API: {e}")
-                    st.stop()
-
                 ai_scores = []
                 total_urls = len(df)
 
@@ -114,22 +121,9 @@ if uploaded_file is not None:
                     # 1. Scrape
                     scraped_text = scrape_text_from_url(url)
 
-                    if not scraped_text:
-                        st.warning(f"⚠️ Could not extract text from {url}. Skipping AI evaluation.")
-                        ai_scores.append(None)
-                    else:
-                        # 2. Evaluate
-                        try:
-                            score = evaluate_ai_content(scraped_text, model)
-                            if score is None:
-                                st.warning(f"⚠️ Not enough text on {url} for a reliable score (min 50 chars).")
-                            ai_scores.append(score)
-                        except Exception as e:
-                            st.error(f"❌ Error evaluating {url}: {e}")
-                            ai_scores.append(None)
-
-                        # Rate limit protection (as requested by user)
-                        time.sleep(1)
+                    # 2. Evaluate
+                    score = evaluate_ai_content(scraped_text, hf_token)
+                    ai_scores.append(score)
 
                     # Update progress
                     progress_bar.progress((index + 1) / total_urls)
@@ -137,56 +131,39 @@ if uploaded_file is not None:
                 status_text.text("✅ Evaluation complete!")
                 df['AI_Score'] = ai_scores
 
-                # Filter out rows where AI evaluation failed for the regression
-                df_clean = df.dropna(subset=['AI_Score'])
+                st.write("### Scored Data", df)
 
-                if df_clean.empty:
-                    st.error("No valid AI scores were generated. Cannot perform analysis.")
-                else:
-                    st.write("### Scored Data", df)
-                    if len(df_clean) < len(df):
-                        st.info(f"Note: {len(df) - len(df_clean)} rows were excluded from analysis due to missing scores.")
+                # --- REGRESSION AND VISUALIZATION ---
+                st.write("### Linear Regression Analysis")
 
-                    # --- REGRESSION AND VISUALIZATION ---
-                    st.write("### Linear Regression Analysis")
+                fig = px.scatter(
+                    df,
+                    x="AI_Score",
+                    y="Click_Change",
+                    trendline="ols",
+                    hover_data=["URL"],
+                    title="Impact of AI Content on YoY Click Change",
+                    labels={
+                        "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
+                        "Click_Change": "Click Change YoY (%)"
+                    }
+                )
 
-                    fig = px.scatter(
-                        df_clean,
-                        x="AI_Score",
-                        y="Click_Change",
-                        trendline="ols",
-                        hover_data=["URL"],
-                        title="Impact of AI Content on YoY Click Change",
-                        labels={
-                            "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
-                            "Click_Change": "Click Change YoY (%)"
-                        }
-                    )
+                fig.update_layout(template="plotly_white")
+                fig.update_traces(marker=dict(size=10, opacity=0.7, color="#1f77b4"))
 
-                    # Enhance marker visibility for individual data points
-                    fig.update_layout(template="plotly_white")
-                    fig.update_traces(
-                        marker=dict(
-                            size=12,
-                            opacity=0.8,
-                            color="#1f77b4",
-                            line=dict(width=1, color='DarkSlateGrey')
-                        ),
-                        selector=dict(mode='markers')
-                    )
+                st.plotly_chart(fig, use_container_width=True)
 
-                    st.plotly_chart(fig, use_container_width=True)
+                # --- EXTRACT STATS ---
+                results = px.get_trendline_results(fig)
+                if not results.empty:
+                    model = results.iloc[0]["px_fit_results"]
 
-                    # --- EXTRACT STATS ---
-                    results = px.get_trendline_results(fig)
-                    if not results.empty:
-                        model_results = results.iloc[0]["px_fit_results"]
+                    col1, col2, col3 = st.columns(3)
 
-                        col1, col2, col3 = st.columns(3)
-
-                        r_squared = model_results.rsquared
-                        p_value = model_results.pvalues[1]
-                        slope = model_results.params[1]
+                    r_squared = model.rsquared
+                    p_value = model.pvalues[1]
+                    slope = model.params[1]
 
                     col1.metric("R-Squared", f"{r_squared:.4f}")
                     col2.metric("P-Value", f"{p_value:.4f}")

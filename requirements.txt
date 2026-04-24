@@ -5,4 +5,3 @@ plotly
 statsmodels
 beautifulsoup4
 requests
-google-generativeai
