@@ -6,4 +6,5 @@ statsmodels
 beautifulsoup4
 requests
 transformers
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch
