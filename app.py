@@ -4,9 +4,21 @@ import numpy as np
 import plotly.express as px
 import requests
 from bs4 import BeautifulSoup
-import time
+from transformers import pipeline
 
-# --- AI EVALUATION LOGIC (HUGGING FACE) ---
+# --- LOAD AI DETECTOR LOCALLY ---
+@st.cache_resource(show_spinner="Downloading Oxidane AI Detector model (this takes a minute on first boot)...")
+def load_ai_detector():
+    """
+    Downloads the model directly into Streamlit's memory.
+    @st.cache_resource ensures it only downloads once and stays in RAM.
+    """
+    # device=-1 forces it to run on CPU, which is required for Streamlit Cloud
+    return pipeline("text-classification", model="Oxidane/tmr-ai-text-detector", device=-1)
+
+# Initialize the model
+detector_pipeline = load_ai_detector()
+
 def scrape_text_from_url(url):
     """Scrapes paragraph text from a given URL."""
     try:
@@ -18,66 +30,43 @@ def scrape_text_from_url(url):
         paragraphs = soup.find_all('p')
         text = ' '.join([p.get_text() for p in paragraphs])
 
-        # RoBERTa models typically have a 512-token limit.
-        # We truncate to ~1500 characters to prevent API token overflow errors.
+        # RoBERTa models process max 512 tokens. We truncate characters to prevent crashes.
         return text[:1500]
     except Exception as e:
         st.toast(f"Error scraping {url}: {e}")
         return None
 
-def evaluate_ai_content(text, api_token):
-    """Sends text to Hugging Face API and returns a 1-10 score."""
+def evaluate_ai_content_locally(text):
+    """Evaluates text using the locally loaded Hugging Face model."""
     if not text or len(text.strip()) < 50:
         return 5 # Neutral score if there's not enough text
 
-    # Endpoint for the specific Oxidane model
-    API_URL = "https://api-inference.huggingface.co/models/Oxidane/tmr-ai-text-detector"
-    headers = {"Authorization": f"Bearer {api_token}"}
-
     try:
-        # Sleep to respect free tier rate limits
-        time.sleep(1.5)
-        response = requests.post(API_URL, headers=headers, json={"inputs": text})
+        # Run the text through the local model
+        result = detector_pipeline(text)
 
-        # Catch HTTP errors (e.g., 503 Model Loading, 429 Rate Limit)
-        if not response.ok:
-            st.toast(f"API Failed ({response.status_code}): {response.text[:100]}")
-            return 5
+        fake_score = 0.5 # Default neutral
 
-        result = response.json()
-
-        # Hugging Face models sometimes need to "wake up"
-        if isinstance(result, dict) and 'estimated_time' in result:
-            wait_time = int(result['estimated_time']) + 2
-            st.toast(f"Model warming up, waiting {wait_time} seconds...")
-            time.sleep(wait_time)
-            response = requests.post(API_URL, headers=headers, json={"inputs": text})
-            if not response.ok:
-                return 5
-            result = response.json()
-
-        fake_score = 0.5 # Default to neutral
-
-        # Robustly parse the labels.
-        # Community models use different names for the "AI" class (e.g., LABEL_1, Fake, AI)
+        # Parse the output. The pipeline usually returns: [{'label': 'LABEL_1', 'score': 0.85}]
         if isinstance(result, list) and len(result) > 0:
-            labels_list = result[0] if isinstance(result[0], list) else result
+            label_data = result[0]
+            label_name = str(label_data.get('label', '')).lower()
+            score = label_data.get('score', 0.5)
 
-            for label_data in labels_list:
-                label_name = str(label_data.get('label', '')).lower()
-                # Check against common AI label names
-                if label_name in ['ai', 'fake', 'label_1', '1', 'generated']:
-                    fake_score = label_data.get('score', 0.5)
-                    break
+            # Identify if the highest confidence label means "AI" (usually LABEL_1 or 'fake')
+            if label_name in ['ai', 'fake', 'label_1', '1', 'generated']:
+                fake_score = score
+            else:
+                # If the highest confidence is "Human" (LABEL_0), invert the score for our 1-10 scale
+                fake_score = 1.0 - score
 
         # Convert percentage (0.0 - 1.0) to a 1-10 integer scale
         final_score = int(round(fake_score * 10))
-        return max(1, final_score)
+        return max(1, min(10, final_score)) # Clamp between 1 and 10
 
     except Exception as e:
         st.toast(f"Evaluation Error: {e}")
         return 5
-
 
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="AI Content vs. Clicks Analyzer", layout="wide")
@@ -85,95 +74,88 @@ st.set_page_config(page_title="AI Content vs. Clicks Analyzer", layout="wide")
 st.title("📈 AI Content vs. Organic Click Performance")
 st.markdown("""
 Upload a CSV containing your URLs and their Year-over-Year (YoY) click change.
-This tool scans the pages, rates the presence of AI-generated content (1-10) using **Oxidane/tmr-ai-text-detector**, and performs a linear regression.
+This tool scans the pages, rates the presence of AI-generated content (1-10) using **Oxidane/tmr-ai-text-detector** (running locally!), and performs a linear regression.
 """)
 
-# --- SIDEBAR CONFIGURATION ---
-st.sidebar.header("1. API Configuration")
-hf_token = st.sidebar.text_input("Hugging Face API Token", type="password", help="Get a free token from huggingface.co/settings/tokens")
-
-st.sidebar.header("2. Data Input")
+st.sidebar.header("Data Input")
 uploaded_file = st.sidebar.file_uploader("Upload CSV (Columns: URL, Click_Change)", type=["csv"])
 
 # --- MAIN APP FLOW ---
 if uploaded_file is not None:
-    if not hf_token:
-        st.warning("⚠️ Please enter your Hugging Face API Token in the sidebar to proceed.")
+    df = pd.read_csv(uploaded_file)
+
+    if 'URL' not in df.columns or 'Click_Change' not in df.columns:
+        st.error("CSV must contain exactly 'URL' and 'Click_Change' columns.")
     else:
-        df = pd.read_csv(uploaded_file)
+        st.write("### Data Preview", df.head())
 
-        if 'URL' not in df.columns or 'Click_Change' not in df.columns:
-            st.error("CSV must contain exactly 'URL' and 'Click_Change' columns.")
-        else:
-            st.write("### Data Preview", df.head())
+        if st.button("Run AI Evaluation & Analysis", type="primary"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-            if st.button("Run AI Evaluation & Analysis", type="primary"):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+            ai_scores = []
+            total_urls = len(df)
 
-                ai_scores = []
-                total_urls = len(df)
+            for index, row in df.iterrows():
+                url = row['URL']
+                status_text.text(f"Processing ({index + 1}/{total_urls}): {url}")
 
-                for index, row in df.iterrows():
-                    url = row['URL']
-                    status_text.text(f"Processing ({index + 1}/{total_urls}): {url}")
+                # 1. Scrape
+                scraped_text = scrape_text_from_url(url)
 
-                    # 1. Scrape
-                    scraped_text = scrape_text_from_url(url)
+                # 2. Evaluate (Instant, no API calls)
+                score = evaluate_ai_content_locally(scraped_text)
+                ai_scores.append(score)
 
-                    # 2. Evaluate
-                    score = evaluate_ai_content(scraped_text, hf_token)
-                    ai_scores.append(score)
+                # Update progress
+                progress_bar.progress((index + 1) / total_urls)
 
-                    # Update progress
-                    progress_bar.progress((index + 1) / total_urls)
+            status_text.text("✅ Evaluation complete!")
+            df['AI_Score'] = ai_scores
 
-                status_text.text("✅ Evaluation complete!")
-                df['AI_Score'] = ai_scores
+            st.write("### Scored Data", df)
 
-                st.write("### Scored Data", df)
+            # --- REGRESSION AND VISUALIZATION ---
+            st.write("### Linear Regression Analysis")
 
-                # --- REGRESSION AND VISUALIZATION ---
-                st.write("### Linear Regression Analysis")
+            fig = px.scatter(
+                df,
+                x="AI_Score",
+                y="Click_Change",
+                trendline="ols",
+                hover_data=["URL"],
+                title="Impact of AI Content on YoY Click Change",
+                labels={
+                    "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
+                    "Click_Change": "Click Change YoY (%)"
+                }
+            )
 
-                fig = px.scatter(
-                    df,
-                    x="AI_Score",
-                    y="Click_Change",
-                    trendline="ols",
-                    hover_data=["URL"],
-                    title="Impact of AI Content on YoY Click Change",
-                    labels={
-                        "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
-                        "Click_Change": "Click Change YoY (%)"
-                    }
-                )
+            fig.update_layout(template="plotly_white")
+            fig.update_traces(marker=dict(size=10, opacity=0.7, color="#1f77b4"))
 
-                fig.update_layout(template="plotly_white")
-                fig.update_traces(marker=dict(size=10, opacity=0.7, color="#1f77b4"))
+            st.plotly_chart(fig, use_container_width=True)
 
-                st.plotly_chart(fig, use_container_width=True)
+            # --- EXTRACT STATS ---
+            results = px.get_trendline_results(fig)
+            if not results.empty:
+                model = results.iloc[0]["px_fit_results"]
 
-                # --- EXTRACT STATS ---
-                results = px.get_trendline_results(fig)
-                if not results.empty:
-                    model = results.iloc[0]["px_fit_results"]
+                col1, col2, col3 = st.columns(3)
 
-                    col1, col2, col3 = st.columns(3)
+                r_squared = model.rsquared
+                p_value = model.pvalues[1]
+                slope = model.params[1]
 
-                    r_squared = model.rsquared
-                    p_value = model.pvalues[1]
-                    slope = model.params[1]
+                col1.metric("R-Squared", f"{r_squared:.4f}")
+                col2.metric("P-Value", f"{p_value:.4f}")
+                col3.metric("Trend (Slope)", f"{slope:.2f}")
 
-                    col1.metric("R-Squared", f"{r_squared:.4f}")
-                    col2.metric("P-Value", f"{p_value:.4f}")
-                    col3.metric("Trend (Slope)", f"{slope:.2f}")
-
-                    st.markdown("#### Interpretation:")
-                    if p_value < 0.05:
-                        if slope < 0:
-                            st.warning(f"**Statistically significant negative relationship.** As the AI score increases, click performance decreases by {abs(slope):.2f} units per point.")
-                        else:
-                            st.success(f"**Statistically significant positive relationship.** As the AI score increases, click performance increases by {slope:.2f} units per point.")
+                st.markdown("#### Interpretation:")
+                if p_value < 0.05:
+                    if slope < 0:
+                        st.warning(f"**Statistically significant negative relationship.** As the AI score increases, click performance decreases by {abs(slope):.2f} units per point.")
                     else:
-                        st.info("**No statistically significant relationship** (p >= 0.05). The AI score does not strongly correlate with the click change in this dataset.")
+                        st.success(f"**Statistically significant positive relationship.** As the AI score increases, click performance increases by {slope:.2f} units per point.")
+                else:
+                    st.info("**No statistically significant relationship** (p >= 0.05). The AI score does not strongly correlate with the click change in this dataset.")

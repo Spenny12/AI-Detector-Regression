@@ -5,3 +5,5 @@ plotly
 statsmodels
 beautifulsoup4
 requests
+transformers
+torch
