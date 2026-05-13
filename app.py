@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from transformers import pipeline
 import io
@@ -18,15 +18,22 @@ def load_ai_detector():
 detector_pipeline = load_ai_detector()
 
 def scrape_text_from_url(url):
-    """Scrapes paragraph text from a given URL."""
+    """Scrapes paragraph text using Cloudscraper to bypass bot protection."""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
+        # Create a scraper that mimics a real Chrome browser
+        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+
+        response = scraper.get(url, timeout=15)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.content, 'html.parser')
         paragraphs = soup.find_all('p')
         text = ' '.join([p.get_text() for p in paragraphs])
+
+        # Security Check: Did we still hit a Captcha/Cloudflare wall?
+        if "enable cookies" in text.lower() or "verify you are human" in text.lower() or "cloudflare" in text.lower():
+             st.toast(f"⚠️ Bot protection blocked scraping for: {url}")
+             return None
 
         # RoBERTa models process max 512 tokens. We truncate characters to prevent crashes.
         return text[:1500]
@@ -126,17 +133,23 @@ if uploaded_file is not None:
 
             status_text.text("✅ Evaluation complete! Grading on a curve...")
 
-            # --- QUANTILE BINNING LOGIC (Grading on a 1-10 curve) ---
+            # --- FIXED QUANTILE BINNING LOGIC ---
             df['Raw_AI_Prob'] = raw_scores
 
             # Fill failed scrapes with median site score
             median_score = df['Raw_AI_Prob'].median()
             df['Raw_AI_Prob'] = df['Raw_AI_Prob'].fillna(median_score)
 
-            # Force the scores into 10 equal buckets based on percentiles
             try:
-                df['AI_Score'] = pd.qcut(df['Raw_AI_Prob'], q=10, duplicates='drop').cat.codes + 1
-            except ValueError:
+                # Use pd.qcut to force the scores into 10 equal buckets
+                bins = pd.qcut(df['Raw_AI_Prob'], q=10, duplicates='drop')
+
+                # If all scores are identical, qcut drops all bins. We catch this to prevent a score of 0.
+                if len(bins.cat.categories) == 0:
+                    df['AI_Score'] = 5
+                else:
+                    df['AI_Score'] = bins.cat.codes + 1
+            except Exception:
                 # Fallback if there is zero variance in the data
                 df['AI_Score'] = 5
 
@@ -149,18 +162,33 @@ if uploaded_file is not None:
             plot_df = df.dropna(subset=['Click_Change'])
 
             if len(plot_df) > 1:
-                fig = px.scatter(
-                    plot_df,
-                    x="AI_Score",
-                    y="Click_Change",
-                    trendline="ols",
-                    hover_data=["URL"],
-                    title="Impact of AI Content on YoY Click Change",
-                    labels={
-                        "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
-                        "Click_Change": "Click Change YoY"
-                    }
-                )
+                # Prevent Plotly OLS crash if all X values are perfectly identical
+                if plot_df['AI_Score'].nunique() > 1:
+                    fig = px.scatter(
+                        plot_df,
+                        x="AI_Score",
+                        y="Click_Change",
+                        trendline="ols",
+                        hover_data=["URL"],
+                        title="Impact of AI Content on YoY Click Change",
+                        labels={
+                            "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
+                            "Click_Change": "Click Change YoY"
+                        }
+                    )
+                else:
+                    fig = px.scatter(
+                        plot_df,
+                        x="AI_Score",
+                        y="Click_Change",
+                        hover_data=["URL"],
+                        title="Impact of AI Content on YoY Click Change",
+                        labels={
+                            "AI_Score": "AI Content Score (1 = Human, 10 = AI)",
+                            "Click_Change": "Click Change YoY"
+                        }
+                    )
+                    st.warning("All pages received the exact same AI Score, so a regression trendline cannot be drawn.")
 
                 fig.update_xaxes(tickvals=list(range(1, 11)), range=[0.5, 10.5])
                 fig.update_layout(template="plotly_white")
@@ -169,41 +197,43 @@ if uploaded_file is not None:
                 st.plotly_chart(fig, use_container_width=True)
 
                 # --- EXTRACT STATS & CREATE EXPORT ---
-                results = px.get_trendline_results(fig)
-                if not results.empty:
-                    model = results.iloc[0]["px_fit_results"]
+                # Only try to extract stats if the trendline actually generated
+                if plot_df['AI_Score'].nunique() > 1:
+                    results = px.get_trendline_results(fig)
+                    if not results.empty:
+                        model = results.iloc[0]["px_fit_results"]
 
-                    col1, col2, col3 = st.columns(3)
+                        col1, col2, col3 = st.columns(3)
 
-                    r_squared = model.rsquared
-                    p_value = model.pvalues[1]
-                    slope = model.params[1]
+                        r_squared = model.rsquared
+                        p_value = model.pvalues[1]
+                        slope = model.params[1]
 
-                    col1.metric("R-Squared", f"{r_squared:.4f}")
-                    col2.metric("P-Value", f"{p_value:.4f}")
-                    col3.metric("Trend (Slope)", f"{slope:.2f}")
+                        col1.metric("R-Squared", f"{r_squared:.4f}")
+                        col2.metric("P-Value", f"{p_value:.4f}")
+                        col3.metric("Trend (Slope)", f"{slope:.2f}")
 
-                    st.markdown("#### Interpretation:")
-                    if p_value < 0.05:
-                        if slope < 0:
-                            st.warning(f"**Statistically significant negative relationship.** As the AI score increases, click performance decreases by {abs(slope):.2f} units per point.")
+                        st.markdown("#### Interpretation:")
+                        if p_value < 0.05:
+                            if slope < 0:
+                                st.warning(f"**Statistically significant negative relationship.** As the AI score increases, click performance decreases by {abs(slope):.2f} units per point.")
+                            else:
+                                st.success(f"**Statistically significant positive relationship.** As the AI score increases, click performance increases by {slope:.2f} units per point.")
                         else:
-                            st.success(f"**Statistically significant positive relationship.** As the AI score increases, click performance increases by {slope:.2f} units per point.")
-                    else:
-                        st.info("**No statistically significant relationship** (p >= 0.05). The AI score does not strongly correlate with the click change in this dataset.")
+                            st.info("**No statistically significant relationship** (p >= 0.05). The AI score does not strongly correlate with the click change in this dataset.")
 
-                    # --- DOWNLOAD BUTTON ---
-                    st.divider()
-                    st.write("### Export Report")
+                        # --- DOWNLOAD BUTTON ---
+                        st.divider()
+                        st.write("### Export Report")
 
-                    excel_file = generate_excel(df, r_squared, p_value, slope)
+                        excel_file = generate_excel(df, r_squared, p_value, slope)
 
-                    st.download_button(
-                        label="📥 Download Excel Data",
-                        data=excel_file,
-                        file_name="ai_impact_analysis.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary"
-                    )
+                        st.download_button(
+                            label="📥 Download Excel Data",
+                            data=excel_file,
+                            file_name="ai_impact_analysis.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary"
+                        )
             else:
                 st.error("Not enough valid 'Click_Change' data to perform a linear regression. Please ensure your CSV has numerical values in the Click_Change column.")

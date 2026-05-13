@@ -5,5 +5,7 @@ plotly
 statsmodels
 beautifulsoup4
 requests
+cloudscraper
 transformers
 torch
+openpyxl
