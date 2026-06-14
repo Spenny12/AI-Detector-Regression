@@ -4,8 +4,7 @@ numpy
 plotly
 statsmodels
 beautifulsoup4
-requests
-cloudscraper
+curl-cffi
 transformers
 torch
 openpyxl

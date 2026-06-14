@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import cloudscraper
+from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
 from transformers import pipeline
 import io
@@ -18,12 +18,10 @@ def load_ai_detector():
 detector_pipeline = load_ai_detector()
 
 def scrape_text_from_url(url):
-    """Scrapes paragraph text using Cloudscraper to bypass bot protection."""
+    """Scrapes paragraph text using curl_cffi to bypass strict TLS/SSL protection."""
     try:
-        # Create a scraper that mimics a real Chrome browser
-        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
-
-        response = scraper.get(url, timeout=15)
+        # Impersonate a real Chrome browser at the TLS layer
+        response = curl_requests.get(url, impersonate="chrome", timeout=15)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.content, 'html.parser')
