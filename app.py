@@ -156,7 +156,7 @@ def get_highly_likely_ai_sentences(text, threshold=0.80):
         return []
 
 # --- EXCEL EXPORT FUNCTION ---
-def generate_excel(df, r_squared, p_value, slope):
+def generate_excel(df, detailed_flagged_df, r_squared, p_value, slope):
     """Creates a multi-sheet Excel file in memory."""
     output = io.BytesIO()
 
@@ -174,6 +174,10 @@ def generate_excel(df, r_squared, p_value, slope):
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         summary_df.to_excel(writer, sheet_name='Regression Summary', index=False)
         df.to_excel(writer, sheet_name='Scored Data', index=False)
+
+        # Write the new itemized report to a separate tab if data exists
+        if detailed_flagged_df is not None and not detailed_flagged_df.empty:
+            detailed_flagged_df.to_excel(writer, sheet_name='Editor To-Do List', index=False)
 
     return output.getvalue()
 
