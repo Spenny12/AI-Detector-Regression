@@ -86,64 +86,74 @@ def evaluate_ai_content_locally(text):
         return None
 
 def get_highly_likely_ai_sentences(text, threshold=0.80):
-    """Splits text into sentences, groups them into larger chunks, evaluates, and returns flagged ones."""
+    """Splits text, evaluates, and merges contiguous AI chunks into readable blocks."""
     if not text:
-        return "No text scraped."
+        return []
 
-    # 1. Split into raw sentences
+    # 1. Split and group into evaluation chunks
     raw_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
-
     if not raw_sentences:
-        return "No valid text found."
+        return []
 
-    # 2. Group sentences into larger chunks (minimum ~200 characters)
     chunks = []
     current_chunk = ""
 
     for sentence in raw_sentences:
         current_chunk = (current_chunk + " " + sentence).strip()
-
-        # Once the chunk reaches a healthy contextual length, save it
         if len(current_chunk) >= 200:
             chunks.append(current_chunk)
             current_chunk = ""
 
-    # 3. Handle leftover text at the end of the scrape
     if current_chunk:
-        # If it's reasonably long or the only text we have, keep it as its own chunk
         if len(current_chunk) >= 100 or not chunks:
             chunks.append(current_chunk)
         else:
-            # If it's too short, append it to the previous chunk to avoid evaluating a tiny snippet
             chunks[-1] += " " + current_chunk
 
     try:
-        # Pass the list of grouped chunks directly into the pipeline for batch processing
-        # Protect the batch processor from crashing on an unusually long text chunk
+        # 2. Evaluate all chunks with truncation enabled to prevent token crashes
         results = detector_pipeline(chunks, truncation=True, max_length=512)
-        flagged_snippets = []
+
+        # 3. --- NEW LOGIC: Merge Contiguous AI Blocks ---
+        merged_ai_blocks = []
+        active_block_text = []
+        active_block_scores = []
 
         for chunk, res in zip(chunks, results):
             label_name = str(res.get('label', '')).lower()
             score = res.get('score', 0.5)
 
-            if label_name in ['ai', 'fake', 'label_1', '1', 'generated']:
-                fake_score = score
-            else:
-                fake_score = 1.0 - score
+            fake_score = score if label_name in ['ai', 'fake', 'label_1', '1', 'generated'] else 1.0 - score
 
-            # If the chunk meets the high-probability threshold, format and save it
             if fake_score >= threshold:
-                flagged_snippets.append(f"[AI Prob: {fake_score:.2f}]\n{chunk}")
+                # Chunk is AI: Add it to the running block
+                active_block_text.append(chunk)
+                active_block_scores.append(fake_score)
+            else:
+                # Chunk is Human: Break the chain and save the block if one exists
+                if active_block_text:
+                    avg_score = sum(active_block_scores) / len(active_block_scores)
+                    merged_ai_blocks.append({
+                        "score": avg_score,
+                        "text": " ".join(active_block_text) # Stitch back into a normal paragraph
+                    })
+                    # Reset the running block
+                    active_block_text = []
+                    active_block_scores = []
 
-        if not flagged_snippets:
-            return "No text blocks flagged above threshold."
+        # Catch any lingering AI block at the very end of the page
+        if active_block_text:
+            avg_score = sum(active_block_scores) / len(active_block_scores)
+            merged_ai_blocks.append({
+                "score": avg_score,
+                "text": " ".join(active_block_text)
+            })
 
-        return "\n\n---\n\n".join(flagged_snippets)
+        return merged_ai_blocks
 
     except Exception as e:
         st.toast(f"Chunk Extraction Error: {e}")
-        return "Error extracting text chunks."
+        return []
 
 # --- EXCEL EXPORT FUNCTION ---
 def generate_excel(df, r_squared, p_value, slope):
