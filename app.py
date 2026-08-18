@@ -209,39 +209,52 @@ if uploaded_file is not None:
             status_text = st.empty()
 
             raw_scores = []
-            extracted_ai_texts = []
+            extracted_ai_texts_ui = [] # Simple strings for the Streamlit UI
+            master_flagged_list = []   # Detailed data for the Excel export
             total_urls = len(df)
 
             for index, row in df.iterrows():
                 url = row['URL']
                 status_text.text(f"Processing ({index + 1}/{total_urls}): {url}")
 
-                # 1. Scrape
                 scraped_text = scrape_text_from_url(url)
-
-                # 2. Evaluate overall text
                 score = evaluate_ai_content_locally(scraped_text)
                 raw_scores.append(score)
 
-                # 3. Extract specific highly likely AI sentences conditionally
                 if scraped_text:
                     if score is not None and score >= deep_scan_threshold:
-                        # Deep scan triggers if page score meets or exceeds user threshold
-                        flagged_text = get_highly_likely_ai_sentences(scraped_text, threshold=0.80)
-                        extracted_ai_texts.append(flagged_text)
-                    else:
-                        extracted_ai_texts.append(f"Skipped (Overall AI probability below {deep_scan_threshold_ui}%).")
-                else:
-                    extracted_ai_texts.append("Failed to scrape.")
+                        # Get the list of dictionaries from our updated function
+                        flagged_snippets = get_highly_likely_ai_sentences(scraped_text, threshold=0.80)
 
-                # Update progress
+                        if flagged_snippets:
+                            # 1. Format a simple string for the Streamlit UI to prevent PyArrow crashes
+                            ui_preview = f"{len(flagged_snippets)} AI blocks flagged. See Excel export."
+                            extracted_ai_texts_ui.append(ui_preview)
+
+                            # 2. Append the complex dictionary data for the Excel sheet
+                            for snippet in flagged_snippets:
+                                master_flagged_list.append({
+                                    "URL": url,
+                                    "AI_Probability": snippet["score"],
+                                    "Flagged_Text": snippet["text"]
+                                })
+                        else:
+                            extracted_ai_texts_ui.append("No text blocks flagged above threshold.")
+                    else:
+                        extracted_ai_texts_ui.append(f"Skipped (Overall AI prob < {deep_scan_threshold_ui}%).")
+                else:
+                    extracted_ai_texts_ui.append("Failed to scrape.")
+
                 progress_bar.progress((index + 1) / total_urls)
 
             status_text.text("✅ Evaluation complete! Grading on a curve...")
 
-            # Add new data to DataFrame
+            # Convert our detailed master list into a separate DataFrame for Excel
+            detailed_flagged_df = pd.DataFrame(master_flagged_list)
+
+            # Assign ONLY the simple strings to the main DataFrame for the UI
             df['Raw_AI_Prob'] = raw_scores
-            df['Flagged_AI_Text'] = extracted_ai_texts
+            df['Flagged_AI_Text'] = extracted_ai_texts_ui
 
             # Fill failed scrapes with median site score
             median_score = df['Raw_AI_Prob'].median()
@@ -257,6 +270,7 @@ if uploaded_file is not None:
                 df['AI_Score'] = 5
 
             st.write("### Scored Data")
+            # Now this will render safely because 'Flagged_AI_Text' contains only simple text strings
             st.dataframe(df[['URL', 'Click_Change', 'AI_Score', 'Raw_AI_Prob', 'Flagged_AI_Text']])
 
             # --- REGRESSION AND VISUALIZATION ---
