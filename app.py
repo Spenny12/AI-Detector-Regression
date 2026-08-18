@@ -32,6 +32,12 @@ def scrape_text_from_url(url):
              st.toast(f"⚠️ Bot protection blocked scraping for: {url}")
              return None
 
+        # Return the complete text so the deep scan can evaluate the entire page
+        return text
+    except Exception as e:
+        st.toast(f"Error scraping {url}: {e}")
+        return None
+
         # Truncate to prevent token crashes on the main evaluation
         return text[:1500]
     except Exception as e:
@@ -39,12 +45,27 @@ def scrape_text_from_url(url):
         return None
 
 def evaluate_ai_content_locally(text):
-    """Evaluates the bulk text and returns the RAW probability (0.0 to 1.0)."""
+    """Evaluates a representative sample of the text and returns the RAW probability."""
     if not text or len(text.strip()) < 50:
         return None
 
     try:
-        result = detector_pipeline(text)
+        # If the text is short enough, just evaluate the whole thing
+        if len(text) <= 2500:
+            eval_text = text
+        else:
+            # Grab a sample from the top, middle, and bottom of the page
+            head = text[:800]
+
+            mid_start = len(text) // 2 - 400
+            mid_end = len(text) // 2 + 400
+            middle = text[mid_start:mid_end]
+
+            tail = text[-800:]
+
+            eval_text = f"{head} {middle} {tail}"
+
+        result = detector_pipeline(eval_text)
         fake_score = 0.5
 
         if isinstance(result, list) and len(result) > 0:
