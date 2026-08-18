@@ -278,6 +278,9 @@ if uploaded_file is not None:
 
             plot_df = df.dropna(subset=['Click_Change'])
 
+            # Default values in case the regression cannot run
+            r_squared, p_value, slope = 0.0, 0.0, 0.0
+
             if len(plot_df) > 1:
                 if plot_df['AI_Score'].nunique() > 1:
                     fig = px.scatter(
@@ -312,7 +315,7 @@ if uploaded_file is not None:
 
                 st.plotly_chart(fig, use_container_width=True)
 
-                # --- EXTRACT STATS & CREATE EXPORT ---
+                # --- EXTRACT STATS ---
                 if plot_df['AI_Score'].nunique() > 1:
                     results = px.get_trendline_results(fig)
                     if not results.empty:
@@ -337,18 +340,20 @@ if uploaded_file is not None:
                         else:
                             st.info("**No statistically significant relationship** (p >= 0.05). The AI score does not strongly correlate with the click change in this dataset.")
 
-                        # --- DOWNLOAD BUTTON ---
-                        st.divider()
-                        st.write("### Export Report")
-
-                        excel_file = generate_excel(df, r_squared, p_value, slope)
-
-                        st.download_button(
-                            label="Download Excel Data",
-                            data=excel_file,
-                            file_name="ai_impact_analysis.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            type="primary"
-                        )
             else:
                 st.error("Not enough valid 'Click_Change' data to perform a linear regression. Please ensure your CSV has numerical values in the Click_Change column.")
+
+            # --- ALWAYS SHOW DOWNLOAD BUTTON ---
+            st.divider()
+            st.write("### Export Report")
+
+            # Pass the detailed_flagged_df into the generator
+            excel_file = generate_excel(df, detailed_flagged_df, r_squared, p_value, slope)
+
+            st.download_button(
+                label="Download Report (Excel / Google Sheets)",
+                data=excel_file,
+                file_name="ai_impact_analysis_with_flags.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
