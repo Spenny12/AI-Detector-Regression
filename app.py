@@ -65,7 +65,8 @@ def evaluate_ai_content_locally(text):
 
             eval_text = f"{head} {middle} {tail}"
 
-        result = detector_pipeline(eval_text)
+        # Force the tokenizer to truncate if we accidentally exceed 512 tokens
+        result = detector_pipeline(eval_text, truncation=True, max_length=512)
         fake_score = 0.5
 
         if isinstance(result, list) and len(result) > 0:
@@ -118,7 +119,8 @@ def get_highly_likely_ai_sentences(text, threshold=0.80):
 
     try:
         # Pass the list of grouped chunks directly into the pipeline for batch processing
-        results = detector_pipeline(chunks)
+        # Protect the batch processor from crashing on an unusually long text chunk
+        results = detector_pipeline(chunks, truncation=True, max_length=512)
         flagged_snippets = []
 
         for chunk, res in zip(chunks, results):
