@@ -64,22 +64,43 @@ def evaluate_ai_content_locally(text):
         return None
 
 def get_highly_likely_ai_sentences(text, threshold=0.80):
-    """Splits text into sentences, evaluates them in a batch, and returns flagged ones."""
+    """Splits text into sentences, groups them into larger chunks, evaluates, and returns flagged ones."""
     if not text:
         return "No text scraped."
 
-    # Split into sentences based on punctuation, keeping sentences longer than 30 characters
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip()) > 30]
+    # 1. Split into raw sentences
+    raw_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
 
-    if not sentences:
-        return "No valid sentences found."
+    if not raw_sentences:
+        return "No valid text found."
+
+    # 2. Group sentences into larger chunks (minimum ~200 characters)
+    chunks = []
+    current_chunk = ""
+
+    for sentence in raw_sentences:
+        current_chunk = (current_chunk + " " + sentence).strip()
+
+        # Once the chunk reaches a healthy contextual length, save it
+        if len(current_chunk) >= 200:
+            chunks.append(current_chunk)
+            current_chunk = ""
+
+    # 3. Handle leftover text at the end of the scrape
+    if current_chunk:
+        # If it's reasonably long or the only text we have, keep it as its own chunk
+        if len(current_chunk) >= 100 or not chunks:
+            chunks.append(current_chunk)
+        else:
+            # If it's too short, append it to the previous chunk to avoid evaluating a tiny snippet
+            chunks[-1] += " " + current_chunk
 
     try:
-        # Pass the list of sentences directly into the pipeline for batch processing
-        results = detector_pipeline(sentences)
+        # Pass the list of grouped chunks directly into the pipeline for batch processing
+        results = detector_pipeline(chunks)
         flagged_snippets = []
 
-        for sent, res in zip(sentences, results):
+        for chunk, res in zip(chunks, results):
             label_name = str(res.get('label', '')).lower()
             score = res.get('score', 0.5)
 
@@ -88,18 +109,18 @@ def get_highly_likely_ai_sentences(text, threshold=0.80):
             else:
                 fake_score = 1.0 - score
 
-            # If the sentence meets the high-probability threshold, format and save it
+            # If the chunk meets the high-probability threshold, format and save it
             if fake_score >= threshold:
-                flagged_snippets.append(f"[AI Prob: {fake_score:.2f}] {sent}")
+                flagged_snippets.append(f"[AI Prob: {fake_score:.2f}]\n{chunk}")
 
         if not flagged_snippets:
-            return "No sentences flagged above threshold."
+            return "No text blocks flagged above threshold."
 
-        return "\n\n".join(flagged_snippets)
+        return "\n\n---\n\n".join(flagged_snippets)
 
     except Exception as e:
-        st.toast(f"Sentence Extraction Error: {e}")
-        return "Error extracting sentences."
+        st.toast(f"Chunk Extraction Error: {e}")
+        return "Error extracting text chunks."
 
 # --- EXCEL EXPORT FUNCTION ---
 def generate_excel(df, r_squared, p_value, slope):
